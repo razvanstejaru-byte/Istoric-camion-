@@ -551,7 +551,7 @@
         <button class="btn-secondary" onclick="manualMonthReset()">Începe manual lună nouă</button>
       </div>
     </div>
-    <div class="card"><h2 class="blue">Jurnal zilnic</h2><div id="dailyKmWrap"></div></div>
+    <div class="card"><h2 class="blue">Jurnal zilnic</h2><button class="btn-primary blue" onclick="openAddDailyModal()">＋ Adaugă zi uitată</button><div id="dailyKmWrap"></div></div>
     <div class="card"><h2 class="blue">Istoric luni închise</h2><div id="monthHistoryWrap"></div></div>
   </div>
 
@@ -663,14 +663,14 @@
 
 <div class="modal-overlay" id="editKmModal" style="display:none;">
   <div class="modal-box">
-    <h3>✏️ Modifică ziua de km</h3>
+    <h3 id="editKmTitle">✏️ Modifică ziua de km</h3>
     <label>Data</label>
     <input type="date" id="editKmData">
     <label>Km la început de zi</label>
     <input type="number" id="editKmStart" placeholder="ex: 254300" inputmode="numeric">
     <label>Km la sfârșitul zilei</label>
     <input type="number" id="editKmEnd" placeholder="ex: 254650" inputmode="numeric">
-    <button class="btn-primary blue" onclick="confirmEditDaily()">Salvează modificări</button>
+    <button class="btn-primary blue" id="editKmSaveBtn" onclick="confirmEditDaily()">Salvează modificări</button>
     <div class="btn-row"><button class="btn-secondary" onclick="cancelEditDaily()">Anulează</button></div>
   </div>
 </div>
@@ -727,6 +727,12 @@ const db = firebase.database();
 let currentUid = null;
 let currentNume = null;
 let fbReady = false;
+
+// Datele aplicatiei sunt izolate local pe cont. Lista de clienti ramane intentionat comuna.
+function scopedStorageKey(key){
+  if(key === KEY_CLIENTS) return key;
+  return currentUid ? ('consum_camion_user_' + currentUid + '_' + key) : ('consum_camion_guest_' + key);
+}
 
 let selectedMonthKey = todayStr().slice(0, 7);
 
@@ -963,7 +969,7 @@ function loadUserData(){
       if(a && a.monthKey) archiveMap.set(a.monthKey, a);
     });
     const mergedArchive = Array.from(archiveMap.values());
-    localStorage.setItem(KEY_MONTHLY_ARCHIVE, JSON.stringify(mergedArchive));
+    localStorage.setItem(scopedStorageKey(KEY_MONTHLY_ARCHIVE), JSON.stringify(mergedArchive));
 
     restoreFromArchiveIfNeeded(mergedArchive);
 
@@ -1064,7 +1070,7 @@ async function forceRestoreFromFirebase(){
       if(a && a.monthKey) archiveMap.set(a.monthKey, a);
     });
     const mergedArchive = Array.from(archiveMap.values());
-    localStorage.setItem(KEY_MONTHLY_ARCHIVE, JSON.stringify(mergedArchive));
+    localStorage.setItem(scopedStorageKey(KEY_MONTHLY_ARCHIVE), JSON.stringify(mergedArchive));
     if(mergedArchive.length){
       save(KEY_MONTHLY_ARCHIVE, mergedArchive);
     }
@@ -1154,11 +1160,13 @@ const FB_PATHS = {
 };
 
 function load(key, fallback){
-  try{ const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : fallback; }
-  catch(e){ return fallback; }
+  try{
+    const raw = localStorage.getItem(scopedStorageKey(key));
+    return raw ? JSON.parse(raw) : fallback;
+  }catch(e){ return fallback; }
 }
 function save(key, data){
-  localStorage.setItem(key, JSON.stringify(data));
+  localStorage.setItem(scopedStorageKey(key), JSON.stringify(data));
   if(currentUid && FB_PATHS[key]){
     db.ref('users/'+currentUid+'/'+FB_PATHS[key]).set(data)
       .then(()=> setSyncStatus(true))
@@ -1980,44 +1988,102 @@ function postponeDailyClose(){
 }
 function deleteDailyEntry(id){
   if(!confirm('Ștergi ziua?')) return;
+  const entry = dailyKm.find(d => d.id === id);
+  const oldMonth = entry ? monthKeyOf(entry.data) : null;
   dailyKm = dailyKm.filter(d => d.id !== id);
   save(KEY_DAILY, dailyKm);
   resyncOpenMonthFromDaily();
+  if(oldMonth) syncDailyArchiveMonth(oldMonth);
   renderAllViews();
 }
 function editDailyEntry(id){
   const entry = dailyKm.find(d => d.id === id);
   if(!entry) return;
+  document.getElementById('editKmTitle').textContent = '✏️ Modifică ziua de km';
+  document.getElementById('editKmSaveBtn').textContent = 'Salvează modificările';
   document.getElementById('editKmData').value = entry.data;
   document.getElementById('editKmStart').value = entry.kmStart;
   document.getElementById('editKmEnd').value = entry.kmEnd;
   document.getElementById('editKmModal').dataset.entryId = id;
+  document.getElementById('editKmModal').dataset.mode = 'edit';
+  document.getElementById('editKmModal').style.display = 'flex';
+}
+function openAddDailyModal(){
+  const targetMonth = selectedMonthKey || todayStr().slice(0,7);
+  document.getElementById('editKmTitle').textContent = '＋ Adaugă zi de km';
+  document.getElementById('editKmSaveBtn').textContent = 'Adaugă ziua';
+  document.getElementById('editKmData').value = targetMonth + '-01';
+  document.getElementById('editKmStart').value = '';
+  document.getElementById('editKmEnd').value = '';
+  document.getElementById('editKmModal').dataset.entryId = '';
+  document.getElementById('editKmModal').dataset.mode = 'add';
   document.getElementById('editKmModal').style.display = 'flex';
 }
 function confirmEditDaily(){
-  const entryId = parseInt(document.getElementById('editKmModal').dataset.entryId);
+  const modal = document.getElementById('editKmModal');
+  const mode = modal.dataset.mode || 'edit';
+  const entryId = parseInt(modal.dataset.entryId);
   const data = document.getElementById('editKmData').value;
   const kmStart = parseFloat(document.getElementById('editKmStart').value);
   const kmEnd = parseFloat(document.getElementById('editKmEnd').value);
   
   if(!data || isNaN(kmStart) || isNaN(kmEnd)){ alert('Completează toate câmpurile.'); return; }
   if(kmEnd < kmStart){ alert('Km final trebuie să fie mai mare decât cel de început.'); return; }
-  
-  const idx = dailyKm.findIndex(d => d.id === entryId);
-  if(idx > -1){
-    const oldData = dailyKm[idx].data;
-    dailyKm[idx] = { ...dailyKm[idx], data, kmStart, kmEnd, distanta: kmEnd - kmStart };
-    dailyKm.sort((a,b)=> new Date(a.data) - new Date(b.data));
-    if(oldData !== data){
-      const changedMonth = data.slice(0,7);
-      if(changedMonth !== selectedMonthKey) selectedMonthKey = changedMonth;
-    }
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(data)){ alert('Data este invalidă.'); return; }
+  const targetMonth = monthKeyOf(data);
+  if(targetMonth !== selectedMonthKey){
+    if(!confirm('Data este într-o altă lună decât luna selectată. Continui?')) return;
   }
+
+  let oldMonth = null;
+  let changed = false;
+  if(mode === 'add'){
+    const duplicate = dailyKm.some(d => d.data === data);
+    if(duplicate){ alert('Există deja o zi închisă pentru această dată.'); return; }
+    dailyKm.push({ id: Date.now(), data, kmStart, kmEnd, distanta: kmEnd - kmStart, dataStart: data });
+    changed = true;
+  } else {
+    const idx = dailyKm.findIndex(d => d.id === entryId);
+    if(idx === -1){ alert('Ziua nu mai există.'); return; }
+    oldMonth = monthKeyOf(dailyKm[idx].data);
+    dailyKm[idx] = { ...dailyKm[idx], data, kmStart, kmEnd, distanta: kmEnd - kmStart };
+    changed = true;
+  }
+
+  if(!changed) return;
+  dailyKm.sort((a,b)=> new Date(a.data) - new Date(b.data));
   save(KEY_DAILY, dailyKm);
   resyncOpenMonthFromDaily();
-  document.getElementById('editKmModal').style.display = 'none';
+  if(oldMonth) syncDailyArchiveMonth(oldMonth);
+  syncDailyArchiveMonth(targetMonth);
+  modal.style.display = 'none';
+  modal.dataset.mode = 'edit';
   populateMonthSelector();
+  selectedMonthKey = targetMonth;
+  document.getElementById('globalMonthSelect').value = targetMonth;
   renderAllViews();
+}
+
+function syncDailyArchiveMonth(monthKey){
+  if(!monthKey) return;
+  const archive = load(KEY_MONTHLY_ARCHIVE, []);
+  const snap = archive.find(a => a && a.monthKey === monthKey);
+  if(!snap) return;
+
+  snap.dailyKm = (dailyKm || []).filter(d => d.data && String(d.data).startsWith(monthKey));
+  const mr = (months || []).find(m => m.monthKey === monthKey);
+  let kmTotal = 0;
+  if(mr && mr.closed && mr.kmEnd != null && mr.kmStart != null) kmTotal = mr.kmEnd - mr.kmStart;
+  else if(mr && mr.kmCurrent != null && mr.kmStart != null) kmTotal = mr.kmCurrent - mr.kmStart;
+  if(!kmTotal) kmTotal = snap.dailyKm.reduce((sum,d)=> sum + (Number(d.distanta)||0), 0);
+  snap.km_total = kmTotal;
+  snap.salary = calculateMonthSalary(monthKey, kmTotal > 0 ? kmTotal : null);
+  snap.header = snap.header || {};
+  snap.header.zile = snap.salary.zileMuncite || 0;
+  snap.header.litri = snap.header.zile * 2;
+  snap.header.bonuriNr = snap.dailyKm.length;
+  snap.header.bonuriLei = snap.dailyKm.length * BON_MASA_PE_ZI;
+  save(KEY_MONTHLY_ARCHIVE, archive);
 }
 function cancelEditDaily(){
   document.getElementById('editKmModal').style.display = 'none';
